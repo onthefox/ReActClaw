@@ -1,0 +1,20 @@
+{
+  "name": "reactclaw",
+  "version": "0.1.0",
+  "description": "Autonomous ReAct coding agent: local CLI + GitHub Actions loop",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "agent": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+"test": "node --import tsx --test test/loop.test.ts test/pool.test.ts test/files.test.ts test/shell.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT"
+}
