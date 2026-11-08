@@ -57,7 +57,6 @@ test("shell kills commands that exceed the timeout", async () => {
     assert.equal(res.ok, false);
     assert.match(res.output, /timed out/);
   } finally {
-    await sleep(500);
     await rmRetry(cwd);
   }
 });

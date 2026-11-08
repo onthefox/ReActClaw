@@ -37,6 +37,8 @@ function killTree(child: ChildProcessWithoutNullStreams): void {
   }
 }
 
+const KILL_SETTLE_MS = 10_000;
+
 function collect(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number,
@@ -45,6 +47,10 @@ function collect(
   return new Promise((resolve) => {
     let out = Buffer.alloc(0);
     let truncated = false;
+    let timedOut = false;
+    let settled = false;
+    let killWatch: NodeJS.Timeout | undefined;
+
     const append = (chunk: string | Buffer): void => {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
       if (out.length >= maxBytes) {
@@ -59,22 +65,36 @@ function collect(
       const s = out.toString("utf8");
       return truncated ? `${s}\n...output truncated...` : s;
     };
+    const finish = (result: ToolResult): void => {
+      if (settled) return;
+      settled = true;
+      if (killWatch !== undefined) clearTimeout(killWatch);
+      resolve(result);
+    };
 
     child.stdout.on("data", append);
     child.stderr.on("data", append);
 
     const timer = setTimeout(() => {
+      timedOut = true;
       killTree(child);
-      resolve({ ok: false, output: `command timed out after ${timeoutMs} ms\n${text()}` });
+      killWatch = setTimeout(
+        () => finish({ ok: false, output: `command timed out after ${timeoutMs} ms\n${text()}` }),
+        KILL_SETTLE_MS,
+      );
     }, timeoutMs);
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ ok: false, output: `spawn error: ${err.message}` });
+      finish({ ok: false, output: `spawn error: ${err.message}` });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ ok: code === 0, output: `exit code: ${code ?? "signal"}\n${text()}` });
+      finish(
+        timedOut
+          ? { ok: false, output: `command timed out after ${timeoutMs} ms\n${text()}` }
+          : { ok: code === 0, output: `exit code: ${code ?? "signal"}\n${text()}` },
+      );
     });
   });
 }
