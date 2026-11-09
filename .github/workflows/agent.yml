@@ -1,0 +1,83 @@
+name: ReActClaw agent
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: reactclaw-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  ticket:
+    # Run only when the trigger label is exactly "agent" (not on other labels).
+    if: github.event.label.name == 'agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AGENT_ACTOR_ALLOWLIST: ${{ secrets.AGENT_ACTOR_ALLOWLIST }}
+    steps:
+      - name: Gate actor allowlist
+        id: gate
+        env:
+          ACTOR: ${{ github.event.issue.user.login }}
+        run: |
+          allowlist="${AGENT_ACTOR_ALLOWLIST}"
+          if [ -z "$allowlist" ]; then
+            echo "::error::AGENT_ACTOR_ALLOWLIST is not set — refusing to run (closed gate). Add a repo secret with comma-separated logins."
+            exit 1
+          fi
+          actor="$(echo "$ACTOR" | tr '[:upper:]' '[:lower:]')"
+          ok=0
+          IFS=',' read -ra entries <<< "$allowlist"
+          for entry in "${entries[@]}"; do
+            if [ "$(echo "$entry" | tr -d ' ' | tr '[:upper:]' '[:lower:]')" = "$actor" ]; then ok=1; fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::notice::actor ${ACTOR} is not in AGENT_ACTOR_ALLOWLIST — skipping."
+            exit 78
+          fi
+          echo "actor=${ACTOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run agent on ticket
+        id: run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.event.issue.user.login }}
+          AGENT_ACTOR_ALLOWLIST: ${{ secrets.AGENT_ACTOR_ALLOWLIST }}
+          AGENT_ROUTER: ${{ vars.AGENT_ROUTER }}
+          AGENT_BASE_URL: ${{ secrets.AGENT_BASE_URL }}
+          AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+          AGENT_MAX_STEPS: ${{ vars.AGENT_MAX_STEPS }}
+          AGENT_MAX_SECONDS: ${{ vars.AGENT_MAX_SECONDS }}
+        run: |
+          npm run agent -- --ticket "${{ github.event.issue.number }}"
+
+      - name: Upload run traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reactclaw-traces-${{ github.event.issue.number }}
+          path: runs/
+          if-no-files-found: ignore
+          retention-days: 14
