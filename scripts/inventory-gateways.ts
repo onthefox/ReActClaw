@@ -25,6 +25,8 @@ interface Gateway {
   note?: string;
   /** Anthropic Messages API (Claude Code compatible): base whose /v1/messages accepts the protocol. */
   anthropic?: { baseUrl: string; model: string };
+  /** Azure OpenAI chat-only probe (deployment name; base URL + key from env). */
+  azure?: { model: string };
 }
 
 const GATEWAYS: Gateway[] = [
@@ -46,12 +48,13 @@ const GATEWAYS: Gateway[] = [
   { name: "moonshotai", pi: "moonshotai", baseUrl: "https://api.moonshot.ai/v1", group: "byok", auth: { kind: "env", names: ["MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY"] }, anthropic: { baseUrl: "https://api.moonshot.ai/anthropic", model: "kimi-k3.1-pro" } },
   { name: "zai", pi: "zai", baseUrl: "https://api.z.ai/api/paas/v4", group: "byok", auth: { kind: "env", names: ["ZAI_API_KEY", "Z_AI_API_KEY"] }, anthropic: { baseUrl: "https://api.z.ai/api/anthropic", model: "glm-5.3" } },
   { name: "minimax", pi: "minimax", baseUrl: "https://api.minimax.io/v1", group: "byok", auth: { kind: "env", names: ["MINIMAX_API_KEY"] }, anthropic: { baseUrl: "https://api.minimax.io/anthropic", model: "MiniMax-M3.1" } },
+  { name: "azure-openai", pi: "azure", baseUrl: "https://placeholder.openai.azure.com/openai/v1", group: "byok", auth: { kind: "env", names: ["AZURE_OPENAI_API_KEY"] }, azure: { model: "gpt-4o-mini" }, note: "chat-only probe; /models may 404 on locked-down resources" },
   { name: "ollama", pi: "-", baseUrl: "http://localhost:11434/v1", group: "local", auth: { kind: "none" }, note: "our direct-mode default" },
   { name: "lmstudio", pi: "-", baseUrl: "http://localhost:1234/v1", group: "local", auth: { kind: "none" } },
 ];
 
 const NOT_AUTOMATABLE: string[] = [
-  "anthropic, google-native, google-vertex, azure, amazon-bedrock — native protocols, not OpenAI-compatible",
+  "anthropic, google-native, google-vertex, amazon-bedrock — native protocols, not OpenAI-compatible (azure covered by the azapi chat probe)",
   "github-copilot, openai-codex, qwen/xiaomi/zai token-plans, kimi-coding — OAuth device/token flows",
   "cloudflare-ai-gateway, cloudflare-workers-ai — account-scoped configuration",
   "opencode-go — same zen infra as opencode, multi-API; covered by the opencode probe",
@@ -160,6 +163,55 @@ async function probeChat(g: Gateway): Promise<ChatProbe | null> {
   }
 }
 
+/**
+ * Azure OpenAI chat-only probe (docs/azure-access-architecture.md): POST
+ * {base}/chat/completions?api-version=v1 with api-key + Bearer. /models is
+ * deliberately not trusted — it may 404 on locked-down resources.
+ * 200 = LIVE, 401/403 = endpoint exists, needs key.
+ */
+async function probeAzure(g: Gateway): Promise<ChatProbe | null> {
+  if (g.azure === undefined) return null;
+  const key = process.env.AZURE_OPENAI_API_KEY ?? "";
+  if (key.length === 0) return { status: "SKIP", detail: "no AZURE_OPENAI_API_KEY", ms: 0 };
+  const base =
+    process.env.AZURE_OPENAI_BASE_URL ??
+    (process.env.AZURE_OPENAI_RESOURCE_NAME
+      ? `https://${process.env.AZURE_OPENAI_RESOURCE_NAME}.openai.azure.com/openai/v1`
+      : null);
+  if (base === null) return { status: "SKIP", detail: "no AZURE_OPENAI_BASE_URL/RESOURCE_NAME", ms: 0 };
+  const model = process.env.AZURE_OPENAI_MODEL ?? process.env.AGENT_AZURE_MODEL ?? g.azure.model;
+  const apiVersion = process.env.AZURE_OPENAI_API_VERSION ?? "v1";
+  const started = Date.now();
+  try {
+    const res = await fetchWithTimeout(
+      `${base.replace(/\/+$/, "")}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "api-key": key, authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "Reply with exactly: OK" }],
+          max_tokens: 10,
+        }),
+      },
+      CHAT_TIMEOUT_MS,
+    );
+    const ms = Date.now() - started;
+    if (res.status === 401 || res.status === 403) return { status: "EXISTS", detail: "needs valid key", ms };
+    if (res.status === 429) return { status: "THROTTLED", detail: "HTTP 429", ms };
+    if (res.ok) {
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string | null } }> };
+      const content = body.choices?.[0]?.message?.content?.trim().slice(0, 40) ?? "(empty)";
+      return { status: "LIVE", detail: `reply="${content}"`, ms };
+    }
+    const text = (await res.text()).slice(0, 90).replace(/\s+/g, " ");
+    return { status: "FAIL", detail: `HTTP ${res.status} ${text}`, ms };
+  } catch (err) {
+    const msg = err instanceof Error && err.name === "AbortError" ? "timeout" : String(err instanceof Error ? err.message : err);
+    return { status: "DOWN", detail: msg, ms: Date.now() - started };
+  }
+}
+
 /** Anthropic Messages API probe. 200 = LIVE, 401/403 = endpoint exists, needs key; 404 = absent. */
 async function probeAnthropic(g: Gateway): Promise<ChatProbe | null> {
   if (g.anthropic === undefined) return null;
@@ -201,22 +253,29 @@ async function main(): Promise<void> {
     "group".padEnd(6),
     "models".padEnd(22),
     "chat".padEnd(11),
+    "azapi".padEnd(11),
     "ccapi".padEnd(11),
     "detail",
   );
   const alive = { pool: 0, byok: 0, local: 0 };
   let ccEndpoints = 0;
+  let azEndpoints = 0;
   for (const g of GATEWAYS) {
     const models = await probeModels(g);
     const chat = await probeChat(g);
+    const az = await probeAzure(g);
     const cc = await probeAnthropic(g);
     const chatCell = chat === null ? "-" : chat.status;
+    const azCell = az === null ? "-" : az.status;
     const ccCell = cc === null ? "-" : cc.status;
     if (cc !== null && (cc.status === "LIVE" || cc.status === "EXISTS" || cc.status === "THROTTLED")) ccEndpoints += 1;
+    if (az !== null && (az.status === "LIVE" || az.status === "EXISTS" || az.status === "THROTTLED")) azEndpoints += 1;
     const detail = [
+      g.note ?? "",
       models.detail,
       models.freeCount > 0 ? `free=${models.freeCount}${models.freeSample ? ` [${models.freeSample}]` : ""}` : "",
       chat === null ? "" : chat.detail,
+      az === null ? "" : az.detail,
       cc === null ? "" : cc.detail,
     ]
       .filter((s) => s.length > 0)
@@ -226,6 +285,7 @@ async function main(): Promise<void> {
       g.group.padEnd(6),
       `${models.status}(${models.detail})`.padEnd(22),
       chatCell.padEnd(11),
+      azCell.padEnd(11),
       ccCell.padEnd(11),
       detail,
     );
@@ -233,6 +293,7 @@ async function main(): Promise<void> {
   }
   console.log("");
   console.log(`[inventory] reachable /models: pool=${alive.pool} byok=${alive.byok} local=${alive.local}`);
+  console.log(`[inventory] azure chat endpoints (api-key + api-version): ${azEndpoints}`);
   console.log(`[inventory] claude-code compatible (anthropic /v1/messages) endpoints: ${ccEndpoints}`);
   console.log("[inventory] not automatable here (protocol/OAuth/account-scoped):");
   for (const line of NOT_AUTOMATABLE) console.log(`  - ${line}`);

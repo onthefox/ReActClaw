@@ -37,6 +37,10 @@ npm run typecheck
 | `AGENT_MAX_STEPS` | Max ReAct steps per run | `24` |
 | `AGENT_MAX_SECONDS` | Max wall-clock seconds per run | `600` |
 | `AGENT_ROUTER` | `pool` (default) or `direct` | `pool` |
+| `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` | adds a BYOK Azure entry to the pool | — |
+| `AGENT_AZURE_MODEL` (or `AZURE_OPENAI_MODEL`) | Azure model/deployment id for that entry | — |
+| `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` | `modelId=deploymentName,...` sent as `model` | — |
+| `AGENT_ANTHROPIC_BASE_URL` + `AGENT_ANTHROPIC_API_KEY` + `AGENT_ANTHROPIC_MODEL` | adds a BYOK Claude Code (Anthropic Messages) entry to the pool | — |
 
 ## Routing: free pool or direct
 
@@ -49,10 +53,17 @@ backoff capped at 10 min) and a `PoolExhaustedError` when everything is down:
 |---|---|---|
 | `kilo` | `https://ai-gateway.kilo.ai/api/v1` | `kilo-auto/free` |
 | `pollinations` | `https://text.pollinations.ai/openai` | `openai` |
-| `opencode` | `https://opencode.ai/zen/v1` | `deepseek-v4-flash-free` |
+| `opencode` | `https://opencode.ai/zen/v1` | `deepseek-v4.1-flash-free` |
 
 Direct mode (one provider, e.g. local Ollama) is used when you set `AGENT_BASE_URL`,
 or force it with `AGENT_ROUTER=direct`.
+
+Entries speak three protocols: `openai` (chat/completions, the default),
+`azure-openai` (unified `https://{resource}.openai.azure.com/openai/v1` path with
+`api-version` and deployment-name mapping), and `anthropic` (Anthropic Messages
+`/v1/messages` — Claude Code compatible; e.g. `https://api.deepseek.com/anthropic`
+with `deepseek-chat`). BYOK entries above are appended to the pool when their env
+vars are present.
 
 Check which entries are alive right now:
 
